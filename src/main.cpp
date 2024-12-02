@@ -4,176 +4,164 @@
 #define PW_PIN1 25
 #define PW_PIN2 26
 
-// Motor pins
 #define MOTOR_1 33
 #define MOTOR_2 32
 
-// Constants
-#define RELIABILITY_THRESHOLD 10 // Distance sensors' reliability threshold (10 cm)
-#define SAFE_DISTANCE 150        // Safe distance threshold (150 cm)
-#define BUFFER_SIZE 20           // Buffer size for filtering
+#define RELIABILITY_THRESHOLD 10 //avstandssensors pålitelighet er funnet ekseperimentelt til å være ca 10cm
+#define SAFE_DISTANCE 150 //objekter 150cm fra hodet regnes som sikkert
+
+#define BUFFER_SIZE 15
 
 const uint16_t MAX_DISTANCE_US = 18500; // Maximum pulse width in microseconds
 const uint16_t MAX_DISTANCE_CM = 640;   // Maximum valid distance in cm
 
-// Buffers for sensor readings
+//For å lagre avlesinger av sensorene i hver sin array
 uint16_t sensor1Readings[BUFFER_SIZE] = {0};
 uint16_t sensor2Readings[BUFFER_SIZE] = {0};
 
-// Indices for circular buffers
+//starte bufferen på 0
 uint8_t buffer1_index = 0;
 uint8_t buffer2_index = 0;
 
-// Variables for stable distances
-uint16_t stableDistance1 = 0;
-uint16_t stableDistance2 = 0;
+// variabler for logikk
+uint16_t previousReading1 = 0;
+uint16_t previousReading2 = 0;
 
-// Motor control variable
 uint8_t motorMode;
 
-// User-defined functions
+// brukerdefinerte funksjoner 
 uint16_t measureDistance(uint8_t PW_PIN);
 void write_to_buffer(uint16_t *buffer, uint16_t newVal, uint8_t *index);
-uint16_t weighted_average_filter(uint16_t *buffer);
-uint16_t filter_with_threshold(uint16_t current, uint16_t previous);
+uint16_t moving_average_filter(uint16_t *buffer);
 uint8_t select_motorMode(uint16_t sensor1_value, uint16_t sensor2_value);
 
 void setup() {
   Serial.begin(115200);
 
-  // Configure pins for sensors
+  //Sensorenes PW pinner vil lese den ultrasoniske pulslengden
   pinMode(PW_PIN1, INPUT);
   pinMode(PW_PIN2, INPUT);
 
-  // Configure PWM for motors
   ledcSetup(0, 5000, 8);
   ledcSetup(1, 5000, 8);
+
   ledcAttachPin(MOTOR_1, 0);
   ledcAttachPin(MOTOR_2, 1);
 
-  // Test motors
+  //test for å sjekke at motorene fungerer/er koblet skikkelig
   ledcWrite(0, 255);
   ledcWrite(1, 255);
   delay(2000);
   ledcWrite(0, 0);
-  ledcWrite(1, 0);
+  ledcWrite(1, 255);
 
   Serial.println("Distance measurement started...");
 }
 
 void loop() {
-  static bool measureSensor1 = true; // Toggle between sensors
+  uint16_t filteredDistance1 = 0;
+  uint16_t filteredDistance2 = 0;
 
-  uint16_t rawDistance = measureSensor1 ? measureDistance(PW_PIN1) : measureDistance(PW_PIN2);
+  static unsigned long lastSensorReadTime = 0;
+  const uint8_t sensorInterval = 50;
 
-  if (measureSensor1) {
-    // Process sensor 1
-    write_to_buffer(sensor1Readings, rawDistance, &buffer1_index);
-    uint16_t filteredDistance = weighted_average_filter(sensor1Readings);
-    stableDistance1 = filter_with_threshold(filteredDistance, stableDistance1);
-    Serial.print("Sensor 1 Distance: ");
-    Serial.println(stableDistance1);
-  } else {
-    // Process sensor 2
-    write_to_buffer(sensor2Readings, rawDistance, &buffer2_index);
-    uint16_t filteredDistance = weighted_average_filter(sensor2Readings);
-    stableDistance2 = filter_with_threshold(filteredDistance, stableDistance2);
-    Serial.print("Sensor 2 Distance: ");
-    Serial.println(stableDistance2);
+  static bool measureSensor1 = true;
+
+  /*
+  * regner ut verdi for sensor hver for seg, for å unngå interferens, Ved å toggle en bool 
+  * bruker ikke blokkerende tidskontroll for kontinuerlig vibrasjon.
+  */
+
+  if (millis() - lastSensorReadTime >= sensorInterval) {
+
+    if (measureSensor1) {
+      uint16_t rawDistance1 = measureDistance(PW_PIN1);
+      write_to_buffer(sensor1Readings, rawDistance1, &buffer1_index);
+      filteredDistance1 = moving_average_filter(sensor1Readings);
+      Serial.print("Sensor 1 Distance: ");
+      Serial.println(filteredDistance1);
+    } else {
+      uint16_t rawDistance2= measureDistance(PW_PIN2);
+      write_to_buffer(sensor2Readings, rawDistance2, &buffer2_index);
+      filteredDistance2 = moving_average_filter(sensor2Readings);
+      Serial.print("Sensor 2 Distance: ");
+      Serial.println(filteredDistance2);
+    }
+
+    measureSensor1 = !measureSensor1; // Toggle sensor
+  } 
+
+  motorMode = select_motorMode(filteredDistance1, filteredDistance2);
+
+  static uint8_t motor1_Intensity = 0;
+  static uint8_t motor2_Intensity = 0;
+
+  //kan endre de forskjellige motortilstandene i hver case
+  switch (motorMode)
+  {
+  case 1: //ingen vibrasjon
+    ledcWrite(0, 0);
+    ledcWrite(1, 0);
+    break;
+  case 2: //vibrasjon på en motor
+    ledcWrite(1, 0); 
+    motor1_Intensity = map(filteredDistance1, RELIABILITY_THRESHOLD, SAFE_DISTANCE, 255, 0);
+    ledcWrite(0, motor1_Intensity);
+    break;
+  case 3: // vibrasjon på en motor
+    ledcWrite(0, 0);
+    motor2_Intensity = map(filteredDistance2, RELIABILITY_THRESHOLD, SAFE_DISTANCE, 255, 0);
+    ledcWrite(1, motor2_Intensity);
+    break;
+  case 4: //virasjon på begge motorer
+    motor1_Intensity = map(filteredDistance1, RELIABILITY_THRESHOLD, SAFE_DISTANCE, 255, 0);
+    motor2_Intensity = map(filteredDistance2, RELIABILITY_THRESHOLD, SAFE_DISTANCE, 255, 0);
+    ledcWrite(0, motor1_Intensity);
+    ledcWrite(1, motor2_Intensity);
+    break;
+  default: // ingen vib
+    ledcWrite(0, 0);
+    ledcWrite(1, 0);
+    break;
   }
-
-  // Toggle between sensors
-  measureSensor1 = !measureSensor1;
-
-  static uint8_t motor1Intensity = 0;
-  static uint8_t motor2Intensity = 0;
-  static uint8_t motor1IntensityBoth = 0;
-  static uint8_t motor2IntensityBoth = 0;
-
-  // Determine motor mode
-  motorMode = select_motorMode(stableDistance1, stableDistance2);
-
-  // Control motors based on motor mode
-  switch (motorMode) {
-    case 1: // No vibration
-      ledcWrite(0, 0);
-      ledcWrite(1, 0);
-      break;
-    case 2: // Vibrate motor 1
-      ledcWrite(1, 0);
-      motor1Intensity = map(stableDistance1, RELIABILITY_THRESHOLD, SAFE_DISTANCE, 255, 0);
-      ledcWrite(0, motor1Intensity);
-      break;
-    case 3: // Vibrate motor 2
-      ledcWrite(0, 0);
-      motor2Intensity = map(stableDistance2, RELIABILITY_THRESHOLD, SAFE_DISTANCE, 255, 0);
-      ledcWrite(1, motor2Intensity);
-      break;
-    case 4: // Vibrate both motors
-      motor1IntensityBoth = map(stableDistance1, RELIABILITY_THRESHOLD, SAFE_DISTANCE, 255, 0);
-      motor2IntensityBoth = map(stableDistance2, RELIABILITY_THRESHOLD, SAFE_DISTANCE, 255, 0);
-      ledcWrite(0, motor1IntensityBoth);
-      ledcWrite(1, motor2IntensityBoth);
-      break;
-    default: // No vibration
-      ledcWrite(0, 0);
-      ledcWrite(1, 0);
-      break;
-  }
-
-  delay(50); // Delay to avoid sensor interference
 }
 
-// Measure distance from ultrasonic sensor
 uint16_t measureDistance(uint8_t PW_PIN) {
   uint16_t pulseWidth = pulseIn(PW_PIN, HIGH, MAX_DISTANCE_US);
 
-  if (pulseWidth == 0 || pulseWidth > MAX_DISTANCE_US) {
-    return 0; // Invalid reading
+  if (pulseWidth > 0) {
+    uint16_t distance = pulseWidth / 58; // puls til cm verdi
+    if (distance <= MAX_DISTANCE_CM) {
+      return distance;
+    }
   }
-  uint16_t distance = pulseWidth / 58; // Convert to cm
-  if (distance > MAX_DISTANCE_CM) {
-    return 0; // Ignore distances beyond the max range
-  }
-  return distance;
+  return 0; // 0 for ugyldige målinger som kommer fra f.eks støy
 }
 
-// Write new value to the circular buffer
 void write_to_buffer(uint16_t *buffer, uint16_t newVal, uint8_t *index) {
-  buffer[*index] = newVal;
-  *index = (*index + 1) % BUFFER_SIZE; // Circular buffer logic
+  if (newVal > 0 && newVal < MAX_DISTANCE_CM) { // Sjekk at ny verdi er gyldig
+    buffer[*index] = newVal;
+    *index = (*index + 1) % BUFFER_SIZE; // inkrementer i den sirkulære
+  }
 }
 
-// Weighted average filter
-uint16_t weighted_average_filter(uint16_t *buffer) {
-  uint32_t sum = 0;
-  uint16_t weight = 1;
+uint16_t moving_average_filter(uint16_t *buffer) {
+  uint32_t accumulated_sum = 0;
   for (uint8_t i = 0; i < BUFFER_SIZE; i++) {
-    sum += buffer[i] * weight;
-    weight++;
+    accumulated_sum += buffer[i];
   }
-  return sum / (BUFFER_SIZE * (BUFFER_SIZE + 1) / 2);
+  return accumulated_sum / BUFFER_SIZE;
 }
 
-// Discard outliers based on a threshold
-uint16_t filter_with_threshold(uint16_t current, uint16_t previous) {
-  const uint16_t THRESHOLD = 5; // Allowable fluctuation in cm
-  if (abs(current - previous) > THRESHOLD) {
-    return previous; // Ignore large jumps
-  }
-  return current;
-}
-
-// Determine motor mode based on sensor distances
 uint8_t select_motorMode(uint16_t sensor1_value, uint16_t sensor2_value) {
   if (sensor1_value > SAFE_DISTANCE && sensor2_value > SAFE_DISTANCE) {
     return 1; // No vibration
   } else if (sensor1_value <= SAFE_DISTANCE && sensor1_value > RELIABILITY_THRESHOLD && sensor2_value > SAFE_DISTANCE) {
-    return 2; // Vibrate motor 1
+    return 2; // Motor 1 vibration
   } else if (sensor2_value <= SAFE_DISTANCE && sensor2_value > RELIABILITY_THRESHOLD && sensor1_value > SAFE_DISTANCE) {
-    return 3; // Vibrate motor 2
+    return 3; // Motor 2 vibration
   } else if (sensor1_value <= SAFE_DISTANCE && sensor2_value <= SAFE_DISTANCE) {
-    return 4; // Vibrate both motors
+    return 4; // Both motors vibrate
   }
-  return 1; // Default: No vibration
+  return 1; // Default: no vibration
 }
